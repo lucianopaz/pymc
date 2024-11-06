@@ -27,10 +27,11 @@ import numpy as np
 from rich.progress import BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from pymc.backends.base import BaseTrace
+from pymc.backends.zarr import ZarrChain
 from pymc.initial_point import PointType
 from pymc.model import Model, modelcontext
 from pymc.stats.convergence import log_warning_stats
-from pymc.step_methods import CompoundStep
+from pymc.step_methods import CompoundStep, StepMethodState
 from pymc.step_methods.arraystep import (
     BlockedStep,
     PopulationArrayStepShared,
@@ -263,6 +264,9 @@ class PopulationStepper:
                 # receiving a None is the signal to exit
                 if incoming is None:
                     break
+                elif incoming == "sampling_state":
+                    secondary_end.send((c, stepper.sampling_state))
+                    continue
                 tune_stop, population = incoming
                 if tune_stop:
                     stepper.stop_tuning()
@@ -306,6 +310,14 @@ class PopulationStepper:
                     self._steppers[c].stop_tuning()
                 updates.append(self._steppers[c].step(population[c]))
         return updates
+
+    def request_sampling_state(self, chain) -> StepMethodState:
+        if self.is_parallelized:
+            self._primary_ends[chain].send(("sampling_state",))
+            _, sampling_state = self._primary_ends[chain].recv()
+        else:
+            sampling_state = self._steppers[chain].sampling_state
+        return sampling_state
 
 
 def _prepare_iter_population(
@@ -432,8 +444,11 @@ def _iter_population(
                 # apply the update to the points and record to the traces
                 for c, strace in enumerate(traces):
                     points[c], stats = updates[c]
-                    strace.record(points[c], stats)
+                    flushed = strace.record(points[c], stats)
                     log_warning_stats(stats)
+                    if flushed and isinstance(strace, ZarrChain):
+                        sampling_state = popstep.request_sampling_state(c)
+                        strace.store_sampling_state(sampling_state)
                 # yield the state of all chains in parallel
                 yield i
     except KeyboardInterrupt:
