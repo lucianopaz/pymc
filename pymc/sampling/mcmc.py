@@ -1282,14 +1282,37 @@ def _iter_sample(
     step.set_rng(rng)
 
     point = start
+    initial_draw_idx = 0
+    step.tune = bool(tune)
+    if hasattr(step, "reset_tuning"):
+        step.reset_tuning()
     if isinstance(trace, ZarrChain):
         trace.link_stepper(step)
+        stored_draw_idx = trace._sampling_state.draw_idx[chain]
+        stored_sampling_state = trace._sampling_state.sampling_state[chain]
+        if stored_draw_idx > 0:
+            if stored_sampling_state is not None:
+                step.sampling_state = stored_sampling_state
+            else:
+                raise RuntimeError(
+                    "Cannot use the supplied ZarrTrace to restart sampling because "
+                    "it has no sampling_state information stored. You will have to "
+                    "resample from scratch."
+                )
+            initial_draw_idx = stored_draw_idx
+            point = {
+                rv_name: (
+                    trace._unconstrained_posterior[rv_name][chain, stored_draw_idx - 1]
+                    if rv_name in trace.unconstrained_variables
+                    else trace._posterior[rv_name][chain, stored_draw_idx - 1]
+                )
+                for rv_name in point
+            }
 
     try:
-        step.tune = bool(tune)
-        if hasattr(step, "reset_tuning"):
-            step.reset_tuning()
-        for i in range(draws):
+        for i in range(initial_draw_idx, draws):
+            diverging = False
+
             if i == 0 and hasattr(step, "iter_count"):
                 step.iter_count = 0
             if i == tune:
