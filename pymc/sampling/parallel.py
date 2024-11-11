@@ -196,6 +196,30 @@ class _Process:
 
         draw = 0
         tuning = True
+        if self._zarr_recording:
+            trace = self._zarr_chain
+            stored_draw_idx = trace._sampling_state.draw_idx[self.chain]
+            stored_sampling_state = trace._sampling_state.sampling_state[self.chain]
+            if stored_draw_idx > 0:
+                if stored_sampling_state is not None:
+                    self._step_method.sampling_state = stored_sampling_state
+                else:
+                    raise RuntimeError(
+                        "Cannot use the supplied ZarrTrace to restart sampling because "
+                        "it has no sampling_state information stored. You will have to "
+                        "resample from scratch."
+                    )
+                draw = stored_draw_idx
+                self._write_point(
+                    {
+                        rv_name: (
+                            trace._unconstrained_posterior[rv_name][self.chain, stored_draw_idx - 1]
+                            if rv_name in trace.unconstrained_variables
+                            else trace._posterior[rv_name][self.chain, stored_draw_idx - 1]
+                        )
+                        for rv_name in self._point
+                    }
+                )
 
         msg = self._recv_msg()
         if msg[0] == "abort":

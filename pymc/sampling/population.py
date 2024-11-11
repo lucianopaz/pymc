@@ -376,9 +376,37 @@ def _prepare_iter_population(
         raise ValueError("Argument `draws` should be above 0.")
 
     # The initialization of traces, samplers and points must happen in the right order:
+    # 0. previous sampling state is loaded if possible
     # 1. population of points is created
     # 2. steppers are initialized and linked to the points object
     # 3. a PopulationStepper is configured for parallelized stepping
+
+    # 0. load sampling state and start point from traces if possible
+    first_draw_idx = 0
+    stored_sampling_states = None
+    can_resume_sampling = False
+    if isinstance(traces[0], ZarrChain):
+        # All traces share the same store. This lets us load the past sampling states and draw
+        # indices for all chain
+        stored_draw_idxs = traces[0]._sampling_state.draw_idx[:]
+        stored_sampling_states = traces[0]._sampling_state.sampling_state[:]
+        can_resume_sampling = (
+            all(stored_draw_idxs > 0)
+            and all(stored_draw_idxs == stored_draw_idxs[0])
+            and all(sampling_state is not None for sampling_state in stored_sampling_states)
+        )
+        if can_resume_sampling:
+            first_draw_idx = stored_draw_idxs[0]
+            for chain, trace in enumerate(traces):
+                point = start[chain]
+                start[chain] = {
+                    rv_name: (
+                        trace._unconstrained_posterior[rv_name][chain, first_draw_idx - 1]
+                        if rv_name in trace.unconstrained_variables
+                        else trace._posterior[rv_name][chain, first_draw_idx - 1]
+                    )
+                    for rv_name in point
+                }
 
     # 1. create a population (points) that tracks each chain
     # it is updated as the chains are advanced
@@ -401,6 +429,8 @@ def _prepare_iter_population(
         for sm in chainstep.methods if isinstance(step, CompoundStep) else [chainstep]:
             if isinstance(sm, PopulationArrayStepShared):
                 sm.link_population(population, c)
+        if can_resume_sampling:
+            chainstep.sampling_state = stored_sampling_states[c]
         steppers.append(chainstep)
 
     # 3. configure the PopulationStepper (expensive call)
@@ -409,7 +439,13 @@ def _prepare_iter_population(
     # Because the preparations above are expensive, the actual iterator is
     # in another method. This way the progbar will not be disturbed.
     return _iter_population(
-        draws=draws, tune=tune, popstep=popstep, steppers=steppers, traces=traces, points=population
+        draws=draws,
+        tune=tune,
+        popstep=popstep,
+        steppers=steppers,
+        traces=traces,
+        points=population,
+        first_draw_idx=first_draw_idx,
     )
 
 
@@ -421,6 +457,7 @@ def _iter_population(
     steppers,
     traces: Sequence[BaseTrace],
     points,
+    first_draw_idx=0,
 ) -> Iterator[int]:
     """Iterate a ``PopulationStepper``.
 
@@ -450,7 +487,7 @@ def _iter_population(
     try:
         with popstep:
             # iterate draws of all chains
-            for i in range(draws):
+            for i in range(first_draw_idx, draws):
                 # this call steps all chains and returns a list of (point, stats)
                 # the `popstep` may interact with subprocesses internally
                 updates = popstep.step(i == tune, points)
