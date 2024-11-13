@@ -40,7 +40,7 @@ from pymc.step_methods.state import (
 )
 from pymc.util import RandomGenerator, get_random_generator
 
-__all__ = ("Competence", "CompoundStep")
+__all__ = ("Competence", "CompoundStep", "StepMethodState")
 
 
 @unique
