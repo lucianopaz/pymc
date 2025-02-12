@@ -993,9 +993,6 @@ def _sample_return(
     Final step of `pm.sampler`.
     """
     if isinstance(traces, ZarrTrace):
-        # Split warmup from posterior samples
-        traces.split_warmup_groups()
-
         # Set sampling time
         traces.sampling_time = t_sampling
 
