@@ -26,6 +26,7 @@ from pymc.model.core import Model
 from pymc.model.fgraph import (
     ModelDeterministic,
     ModelFreeRV,
+    ModelObservedRV,
     ModelValuedVar,
     extract_dims,
     fgraph_from_model,
@@ -361,9 +362,83 @@ def remove_value_transforms(
     return change_value_transforms(model, dict.fromkeys(vars))
 
 
+def unobserve(model: Model, var_names: Sequence[str] | None = None) -> Model:
+    """Convert Observed RVs into free RVs.
+
+    Parameters
+    ----------
+    model: PyMC Model
+    var_names: List of variable names to unobserve. Defaults to all observed variables.
+
+    Returns
+    -------
+    new_model: PyMC model
+        A distinct PyMC model with the relevant variables unobserved.
+        All remaining variables are cloned and can be retrieved via `new_model["var_name"]`.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        import pymc as pm
+
+        with pm.Model() as m:
+            x = pm.Normal("x")
+            y = pm.Normal("y", x)
+            z = pm.Normal("z", y, observed=1.0)
+
+        m_new = pm.unobserve(m)
+
+    Deterministic variables can also be observed. If the variable has already
+    been observed, its old value is replaced with the one provided.
+
+    This relies on PyMC ability to infer the logp of the underlying expression
+
+    .. code-block:: python
+
+        import pymc as pm
+
+        with pm.Model() as m:
+            x = pm.Normal("x")
+            y = pm.Normal.dist(x, shape=(5,))
+            y_censored = pm.Deterministic("y_censored", pm.math.clip(y, -1, 1))
+
+        new_m = pm.observe(m, {y_censored: [0.9, 0.5, 0.3, 1, 1]})
+
+
+    """
+    if var_names is None:
+        vars_to_unobserve = model.observed_RVs
+    else:
+        vars_to_unobserve = [model[name] for name in var_names]
+    if not vars_to_unobserve:
+        raise ValueError("No observed variables were selected to be unobserved")
+
+    fgraph, memo = fgraph_from_model(model)
+
+    replacements = {}
+    for var in vars_to_unobserve:
+        model_var = memo[var]
+
+        # Just a sanity check
+        assert isinstance(model_var.owner.op, ModelObservedRV)
+        assert model_var in fgraph.variables
+
+        var = model_var.owner.inputs[0]
+        var.name = model_var.name
+        dims = extract_dims(model_var)
+        model_free_var = model_free_rv(var, var.type(), model_var.owner.op.transform, *dims)
+        replacements[model_var] = model_free_var
+
+    toposort_replace(fgraph, tuple(replacements.items()))
+
+    return model_from_fgraph(fgraph, mutate_fgraph=True)
+
+
 __all__ = (
     "change_value_transforms",
     "do",
     "observe",
     "remove_value_transforms",
+    "unobserve",
 )
